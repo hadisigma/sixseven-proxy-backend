@@ -1,19 +1,55 @@
 /**
- * SixSeven Proxy — Backend Engine v3
+ * SixSeven Proxy — Backend Engine v4
  * Vercel Serverless Function — by Hadi Al 67
  */
 
 const { URL } = require('url');
+
+// ── Alternative frontends for sites that block proxying ──────────────────────
+// These are open-source public instances that mirror the content properly.
+const ALT_FRONTENDS = {
+  // YouTube → Invidious (open source YT frontend, no bot detection)
+  'youtube.com':        u => rewriteYoutube(u, 'https://inv.nadeko.net'),
+  'www.youtube.com':    u => rewriteYoutube(u, 'https://inv.nadeko.net'),
+  'youtu.be':           u => rewriteYoutube(u, 'https://inv.nadeko.net'),
+  'm.youtube.com':      u => rewriteYoutube(u, 'https://inv.nadeko.net'),
+  // Reddit → Redlib
+  'reddit.com':         u => u.replace('reddit.com', 'redlib.catsarch.com'),
+  'www.reddit.com':     u => u.replace('www.reddit.com', 'redlib.catsarch.com'),
+  'old.reddit.com':     u => u.replace('old.reddit.com', 'redlib.catsarch.com'),
+  // Twitter/X → Nitter
+  'twitter.com':        u => u.replace('twitter.com', 'nitter.privacydev.net'),
+  'www.twitter.com':    u => u.replace('www.twitter.com', 'nitter.privacydev.net'),
+  'x.com':              u => u.replace('x.com', 'nitter.privacydev.net'),
+  // Instagram → Proxigram
+  'instagram.com':      u => u.replace('instagram.com', 'proxigram.lunar.icu'),
+  'www.instagram.com':  u => u.replace('www.instagram.com', 'proxigram.lunar.icu'),
+  // TikTok → ProxiTok
+  'tiktok.com':         u => u.replace('tiktok.com', 'proxitok.pabloferreiro.es'),
+  'www.tiktok.com':     u => u.replace('www.tiktok.com', 'proxitok.pabloferreiro.es'),
+};
+
+function rewriteYoutube(url, invidiousBase) {
+  try {
+    const u = new URL(url);
+    const videoId = u.searchParams.get('v');
+    const listId  = u.searchParams.get('list');
+    // Direct video link
+    if (videoId) return `${invidiousBase}/watch?v=${videoId}${listId ? '&list=' + listId : ''}`;
+    // Short link youtu.be/ID
+    if (u.hostname === 'youtu.be') return `${invidiousBase}/watch?v=${u.pathname.slice(1)}`;
+    // Channel / playlist / search — just swap the host
+    return url.replace(/https?:\/\/(www\.|m\.)?youtube\.com/, invidiousBase)
+              .replace(/https?:\/\/youtu\.be/, invidiousBase + '/watch?v=');
+  } catch { return url; }
+}
 
 function getOrigin(req) {
   const proto = req.headers['x-forwarded-proto'] || 'https';
   const host  = req.headers['x-forwarded-host'] || req.headers['host'] || '';
   return `${proto}://${host}`;
 }
-
-function endpoint(req) {
-  return `${getOrigin(req)}/api/proxy`;
-}
+function endpoint(req) { return `${getOrigin(req)}/api/proxy`; }
 
 function px(url, base, ep) {
   if (!url) return url;
@@ -55,21 +91,16 @@ function rewriteCss(css, base, ep) {
 function buildInjection(base, ep) {
   return `<script id="__67i">
 (function(){
-  var EP=` + JSON.stringify(ep) + `;
-  var BASE=` + JSON.stringify(base) + `;
+  var EP=${JSON.stringify(ep)},BASE=${JSON.stringify(base)};
   function toProxy(url){
     if(!url||typeof url!=='string')return url;
     var t=url.trim();
     if(!t||t.startsWith('data:')||t.startsWith('javascript:')||t.startsWith('blob:')||t.startsWith('#')||t.startsWith(EP))return url;
     try{var abs=new URL(t,BASE).href;if(abs.startsWith(EP))return url;return EP+'?url='+encodeURIComponent(abs);}catch(e){return url;}
   }
-  // Patch fetch
   if(window.fetch){var _f=window.fetch;window.fetch=function(i,o){if(typeof i==='string')i=toProxy(i);return _f.call(this,i,o);};}
-  // Patch XHR
   var _xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){arguments[1]=toProxy(u);return _xo.apply(this,arguments);};
-  // Patch window.open
   var _wo=window.open;window.open=function(u,t,f){return _wo.call(this,toProxy(u),t,f);};
-  // Intercept all link clicks
   document.addEventListener('click',function(e){
     var el=e.target;while(el&&el.tagName!=='A')el=el.parentElement;
     if(!el||!el.href)return;
@@ -77,14 +108,12 @@ function buildInjection(base, ep) {
     if(!href||href.startsWith('#')||href.startsWith('javascript:'))return;
     e.preventDefault();e.stopPropagation();
     var p=toProxy(el.href);
-    document.getElementById('__67_urlinput')&&(document.getElementById('__67_urlinput').value=el.href);
+    try{document.getElementById('__67_urlinput').value=el.href;}catch(x){}
     window.location.href=p;
   },true);
-  // Intercept form submits
   document.addEventListener('submit',function(e){
     var f=e.target,a=f.action||BASE,p=toProxy(a);if(p!==a)f.action=p;
   },true);
-  // MutationObserver for dynamic content
   new MutationObserver(function(ms){
     ms.forEach(function(m){m.addedNodes.forEach(function(n){
       if(n.nodeType!==1)return;
@@ -160,7 +189,20 @@ module.exports = async function handler(req, res) {
 </body></html>`);
   }
 
-  try { new URL(targetUrl); } catch { return res.status(400).send('Invalid URL'); }
+  let parsed;
+  try { parsed = new URL(targetUrl); } catch { return res.status(400).send('Invalid URL'); }
+
+  // ── Check if this domain has a better alternative frontend ──
+  const hostname = parsed.hostname.toLowerCase();
+  const altFn = ALT_FRONTENDS[hostname];
+  if (altFn) {
+    const altUrl = altFn(targetUrl);
+    // Proxy the alternative frontend instead
+    const redirectedTarget = altUrl;
+    // Re-enter the proxy with the new URL
+    res.writeHead(302, { Location: `${ep}?url=${encodeURIComponent(redirectedTarget)}` });
+    return res.end();
+  }
 
   try {
     const fetchHeaders = {
