@@ -1,0 +1,13 @@
+{
+  "name": "sixseven-proxy-backend",
+  "version": "1.0.0",
+  "description": "SixSeven Proxy — Backend Engine by Hadi Al 67",
+  "main": "api/proxy.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "vercel dev"
+  },
+  "license": "MIT"
+}
